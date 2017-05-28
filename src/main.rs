@@ -6,8 +6,8 @@ extern crate zip;
 
 fn main() {
     if let Err(err) = create_archive() {
-        //If there was a problem creating the zip archive,
-        //then print the error and exit(1).
+        //If there was a problem creating the zip
+        //archive, print the error and exit(1).
         println!("Error: {}", err);
         std::process::exit(1);
     }
