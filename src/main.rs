@@ -5,12 +5,16 @@ use std::fs::File;
 extern crate zip;
 
 fn main() {
+    let mut exit_code = 0;
     if let Err(err) = create_archive() {
         //If there was a problem creating the zip
         //archive, print the error and exit(1).
         println!("Error: {}", err);
-        std::process::exit(1);
+        exit_code = 1;
     }
+
+    //Exit with an exit code so that shell scripts can error-check
+    std::process::exit(exit_code);
 }
 
 /*
