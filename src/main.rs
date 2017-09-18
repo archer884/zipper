@@ -1,106 +1,130 @@
-use std::io::prelude::*;
-use zip::write::FileOptions;
+use std::borrow::Cow;
+use std::error;
+use std::fmt;
 use std::fs::File;
+use std::path::PathBuf;
+use std::result;
+use zip::write::FileOptions;
+use zip::ZipWriter;
 
 extern crate zip;
 
-fn main() {
-    let mut exit_code = 0;
-    if let Err(err) = create_archive() {
-        //If there was a problem creating the zip
-        //archive, print the error and exit(1).
-        println!("Error: {}", err);
-        exit_code = 1;
-    }
+type Result<T> = result::Result<T, Error>;
 
-    //Exit with an exit code so that shell scripts can error-check
-    std::process::exit(exit_code);
+#[derive(Debug)]
+struct Error {
+    kind: ErrorKind,
+    cause: Option<Box<error::Error>>,
+    description: Cow<'static, str>
 }
 
-/*
- * This function creates a zip archive, and returns a Result
- * that indicates if all operations were successful.
- *
- * The first command-line argument is the name and path of the zip file to be created,
- * and all the other arguments are the names and paths of the files to be archived
- *
- */
-fn create_archive() -> Result<(), String> {
-    //If there are less than 3 command-line arguments, return an error
-    if std::env::args().count() < 3 {
-        return Err("Usage: zipper <zip file> <file to archive> <file to archive> ...".to_string());
+#[derive(Debug)]
+enum ErrorKind {
+    Usage,
+    IO,
+    Zip,
+}
+
+impl Error {
+    fn usage() -> Self {
+        Error {
+            kind: ErrorKind::Usage,
+            cause: None,
+            description: Cow::from("Usage: zipper <zip file> <file to archive> <file to archive> ..."),
+        }
     }
 
-    //The 1st command line argument is the name of the zip file.
-    //It's not necessary to error check because we already checked
-    //the number of command-line arguments earlier
-    let zipfile_name = std::env::args().nth(1).unwrap();
+    fn io<D, E>(error: E, description: D) -> Self
+    where
+        D: Into<Cow<'static, str>>,
+        E: error::Error + 'static,
+    {
+        Error {
+            kind: ErrorKind::IO,
+            cause: Some(Box::new(error)),
+            description: description.into(),
+        }
+    }
 
+    fn zip<E: error::Error + 'static>(error: E) -> Self {
+        Error {
+            kind: ErrorKind::Zip,
+            cause: Some(Box::new(error)),
+            description: Cow::from("An error occurred creating the archive"),
+        }
+    }
+}
 
-    let path_to_zipfile = std::path::Path::new(&zipfile_name);
-    let zipfile = match std::fs::File::create(&path_to_zipfile) {
-        Err(e) => return Err(format!("Error creating {}: {}", zipfile_name, e)),
-        Ok(f)  => f,
-    };
-    let mut zip = zip::ZipWriter::new(zipfile);
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.description)
+    }
+}
 
+impl error::Error for Error {
+    fn description(&self) -> &str {
+        &self.description
+    }
 
-    //Iterate over the command-line arguments for the names of the
-    //files we wish to archive. Skip the first two arguments.
-    for arg in std::env::args().skip(2) {
-        let filename = &arg;
+    fn cause(&self) -> Option<&error::Error> {
+        match self.cause {
+            None => None,
+            Some(ref cause) => Some(cause.as_ref())
+        }
+    }
+}
 
-        //Extract the raw filename out of the full path entered by the user
-        //This returns the file name as a type &OsStr slice instead of a &str slice
-        let name_of_file = match std::path::Path::new(filename).file_name() {
-            Some(c) => c,
-            None    => return Err(format!("{}: Invalid file name", filename)),
-        };
+fn main() {
+    if let Err(e) = create_archive() {
+        use std::error::Error;
 
-        //Redefine and convert the &OsStr slice to a standard &str slice.
-        //Checks if the filename is valid unicode.
-        let name_of_file = match name_of_file.to_str() {
-            Some(c) => c,
-            None    => return Err(format!("{}: Invalid file name", filename)),
-        };
+        println!("{}", e.description());
+        match e.kind {
+            ErrorKind::Usage => std::process::exit(1),
+            ErrorKind::IO => std::process::exit(2),
+            ErrorKind::Zip => std::process::exit(3),
+        }
+    }
+}
 
-        //Open the file and check for errors
-        let mut f = match File::open(filename) {
-            Err(e) => return Err(format!("{}: {}", filename, e)),
-            Ok(f)  => f,
-        };
+fn open_archive(path: &str) -> Result<ZipWriter<File>> {
+    File::create(path)
+        .map(|f| ZipWriter::new(f))
+        .map_err(|e| Error::io(e, "Unable to create zip file"))
+}
 
-        //Get the file metadata so we can get the file size. Also check for errors
-        let file_metadata = match f.metadata() {
-            Err(e) => return Err(format!("{}: {}", filename, e)),
-            Ok(f)  => f,
-        };
+/// This function attempts to create an archive and returns a result indicating the success or 
+/// failure of the operation.
+/// 
+/// The first command line argument is the path of the zip file to be created, and all other 
+/// arguments are the paths of files to be added to the archive.
+fn create_archive() -> Result<()> {
+    use std::io;
 
-        //Get the exact size of the file from the file metadata
-        let file_size = file_metadata.len() as usize;
+    let mut args = std::env::args().skip(1);
+    let mut archive = open_archive(&args.next().ok_or_else(Error::usage)?)?;
 
-        //Create a buffer to store the file contents that is exactly the size of the file + 1
-        let mut contents: Vec<u8> = Vec::with_capacity(file_size + 1);
+    let files = args.map(|path| {
+        let path = PathBuf::from(path);
+        let file = File::open(&path).map_err(|e| Error::io(e, "Unable to open source file"));
+        (path, file)
+    });
 
+    for (path, file) in files {
+        // I just want to return early here if there's anything wrong with the file.
+        let mut file = file?;
 
-        //Read the file and check for errors
-        f.read_to_end(&mut contents).map_err(|e| e.to_string())?;
+        // We know this is valid UTF-8 because otherwise it wouldn't have been representable as a 
+        // command line argument.
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap();
+        archive.start_file(name, FileOptions::default()) .map_err(|e| Error::zip(e))?;
+        
+        // Honestly not sure if this should be an io error or a zip error.
+        io::copy(&mut file, &mut archive)
+            .map_err(|e| Error::io(e, "An error occurred while copying files"))?;
+    }
 
-        //Now compress the file and write it into the zip archive
-        zip.start_file(name_of_file, FileOptions::default())
-            .map_err(|e| e.to_string())?;
-        zip.write_all(contents.as_slice())
-            .map_err(|e| e.to_string())?;
-
-
-
-    } //end for loop
-
-    //Finish the zip file
-    //try!(zip.finish().map_err(|e| e.to_string()));
-    zip.finish().map_err(|e| e.to_string())?;
-
-
-    //Return an empty Ok tuple because we had no errors.
-    Ok(())
+    Ok({
+        archive.finish().map_err(|e| Error::zip(e))?;
+    })
 }
