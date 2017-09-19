@@ -1,15 +1,19 @@
+#![feature(conservative_impl_trait)]
+
 extern crate zip;
 
+mod command;
 mod error;
 
+use command::CreateArchive;
 use error::*;
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use zip::write::FileOptions;
 use zip::ZipWriter;
 
 fn main() {
-    if let Err(e) = create_archive() {
+    if let Err(e) = CreateArchive::from_args().map(|command| create_archive(command)) {
         use std::error::Error;
 
         println!("{}", e.description());
@@ -20,7 +24,7 @@ fn main() {
     }
 }
 
-fn open_archive(path: &str) -> Result<ZipWriter<File>> {
+fn open_archive<P: AsRef<Path>>(path: P) -> Result<ZipWriter<File>> {
     File::create(path).map(|f| ZipWriter::new(f)).map_err(|e| {
         Error::io(e, "Unable to create zip file")
     })
@@ -31,20 +35,11 @@ fn open_archive(path: &str) -> Result<ZipWriter<File>> {
 ///
 /// The first command line argument is the path of the zip file to be created, and all other
 /// arguments are the paths of files to be added to the archive.
-fn create_archive() -> Result<()> {
+fn create_archive(command: CreateArchive) -> Result<()> {
     use std::io;
 
-    // I don't like the idea of iterating this collection more than once, and this is the easiest 
-    // way to retain your general flow of opening the archive only after determining that there 
-    // are files to compress but before actually opening any of them. My first stab at this was
-    // happy to create an empty archive without spitting out any errors. I also had one that would 
-    // throw an error about an empty archive but would still create the archive.
-    let mut args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() < 2 {
-        return Err(Error::usage());
-    }
-
-    let mut archive = open_archive(&args[0])?;
+    let mut archive = open_archive(command.output())?;
+    
 
     // Draining the tail of the vector like this allows me to take ownership of the contents of 
     // the vector without cloning anything.
